@@ -18,6 +18,7 @@ Packaged
 *.idea
 *.blend1
 Plugins/Developer/RiderLink
+Plugins/
 Content/StarterContent
 
 Content/Maps/ProtoWorld_BuiltData.uasset
