@@ -128,20 +128,113 @@ static void ComputeLinePairs(const FVector PointMultipliers[8], IntPair Pairs[12
 				Pairs[Output++] = {i, j};
 				if (Output == 12)
 				{
-					break;
+					return;
 				}
 			}
 		}
 	}
 }
 
+static bool InBoxXY(const FBox& Box, const FVector& Vec)
+{
+	return (Vec.X > Box.Min.X) && (Vec.Y > Box.Min.Y) && (Vec.X < Box.Max.X) && (Vec.Y < Box.Max.Y);
+}
+
+static bool InBoxXZ(const FBox& Box, const FVector& Vec)
+{
+	return (Vec.X > Box.Min.X) && (Vec.Z > Box.Min.Z) && (Vec.X < Box.Max.X) && (Vec.Z < Box.Max.Z);
+}
+
+static bool InBoxYZ(const FBox& Box, const FVector& Vec)
+{
+	return (Vec.Y > Box.Min.Y) && (Vec.Z > Box.Min.Z) && (Vec.Y < Box.Max.Y) && (Vec.Z < Box.Max.Z);
+}
+
+
 static bool RaysIntersect(const FQuat& World_R_Actor, const FVector& World_t_Actor, const FBox& LocalBox,
                           const FVector& CameraLocationInWorld, const FVector& RayDirectionInWorld)
 {
 	const FVector CameraInActor = World_R_Actor.Inverse() * (CameraLocationInWorld - World_t_Actor);
 	const FVector RayDirInActor = World_R_Actor.Inverse() * RayDirectionInWorld;
-	return FMath::LineBoxIntersection(LocalBox, CameraInActor, CameraInActor + RayDirInActor * 100.0f * 100.0f,
-	                                  RayDirInActor);
+
+	// shorthand:
+	const FVector& P = CameraInActor;
+	const FVector& L = RayDirInActor;
+
+	// check every face:
+	{
+		if (FMath::Abs(L.Z) > SMALL_NUMBER)
+		{
+			// top
+			{
+				// We intersect the top, check if it is in bounds:
+				const float W = LocalBox.Max.Z;
+				const float D = (-P.Z + W) / L.Z;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxXY(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+			// bottom
+			{
+				const float W = -1 * LocalBox.Min.Z;
+				const float D = -(P.Z + W) / L.Z;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxXY(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+		}
+		if (FMath::Abs(L.Y) > SMALL_NUMBER)
+		{
+			// +Y
+			{
+				const float W = LocalBox.Max.Y;
+				const float D = (-P.Y + W) / L.Y;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxXZ(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+			// -Y
+			{
+				const float W = -1 * LocalBox.Min.Y;
+				const float D = -(P.Y + W) / L.Y;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxXZ(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+		}
+		if (FMath::Abs(L.X) > SMALL_NUMBER)
+		{
+			// +X
+			{
+				const float W = LocalBox.Max.X;
+				const float D = (-P.X + W) / L.X;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxYZ(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+			// -X
+			{
+				const float W = -1 * LocalBox.Min.X;
+				const float D = -(P.X + W) / L.X;
+				const FVector IntersectPt = P + L * D;
+				if (InBoxYZ(LocalBox, IntersectPt))
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
 }
 
 static bool Intersects(const FQuat& World_R_Actor, const FVector& World_t_Actor, const FBox& LocalBox,
@@ -291,7 +384,6 @@ void ADragSelectPlayerController::BoxSelect(const FVector2D& StartPoint, const F
 	// PLanes in the world frame
 	WorldPlanes = PlanesForCamera(CameraLocationInWorld, CameraForwardInWorld, TopLeftRayInWorld, TopRightRayInWorld,
 	                              BottomLeftRayInWorld, BottomRightRayInWorld);
-	const FConvexVolume VolumeWorld = WorldPlanes.ToVolume();
 
 	// now try to select
 	// Don't use GetAllActorsOfClass in practice, etc...
@@ -319,9 +411,8 @@ void ADragSelectPlayerController::BoxSelect(const FVector2D& StartPoint, const F
 			RaysIntersect(World_R_Actor, World_t_Actor, LocalBox, CameraLocationInWorld, BottomLeftRayInWorld);
 
 		// if no ray corner intersects, do the other thing:
-		const bool bIntersects = bAnyRayIntersects || Intersects(World_R_Actor, World_t_Actor,
-		                                                         LocalBox,
-		                                                         WorldPlanes, GetWorld());
+		const bool bIntersects = bAnyRayIntersects || Intersects(World_R_Actor, World_t_Actor, LocalBox, WorldPlanes,
+		                                                         GetWorld());
 		if (bIntersects)
 		{
 			DrawDebugBox(GetWorld(), OriginWorld, BoxExtentWorld, FColor::Blue);
