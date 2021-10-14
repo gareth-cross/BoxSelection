@@ -2,8 +2,9 @@
 #include "DragSelectPlayerController.h"
 
 #include "DrawDebugHelpers.h"
-#include "Camera/CameraComponent.h"
 #include "Kismet/GameplayStatics.h"
+
+#include "SelectionBoxFunctionLibrary.h"
 
 ADragSelectPlayerController::ADragSelectPlayerController()
 {
@@ -11,417 +12,93 @@ ADragSelectPlayerController::ADragSelectPlayerController()
 	PrimaryActorTick.bStartWithTickEnabled = true;
 }
 
-// Pair of integers...
-struct IntPair
-{
-	int i;
-	int j;
-};
-
-static uint8 GetRegion(const FVector& Pt, const FBoxPlanes& Planes)
-{
-	if (Planes.TopPlane.PlaneDot(Pt) > 0)
-	{
-		if (Planes.LeftPlane.PlaneDot(Pt) > 0) //	top left
-		{
-			return 9; //	1001
-		}
-		else if (Planes.RightPlane.PlaneDot(Pt) > 0) // top right
-		{
-			return 5; //	0101
-		}
-		else //	top middle
-		{
-			return 1; //	0001
-		}
-	}
-	else if (Planes.BottomPlane.PlaneDot(Pt) > 0)
-	{
-		if (Planes.LeftPlane.PlaneDot(Pt) > 0) //	bottom left
-		{
-			return 10; //	1010
-		}
-		else if (Planes.RightPlane.PlaneDot(Pt) > 0) // bottom right
-		{
-			return 6; //	0110
-		}
-		else // bottom middle
-		{
-			return 2; //	0001
-		}
-	}
-	else //	In between top and bottom
-	{
-		if (Planes.LeftPlane.PlaneDot(Pt) > 0) //	middle left
-		{
-			return 8; //	1000
-		}
-		else if (Planes.RightPlane.PlaneDot(Pt) > 0) // middle right
-		{
-			return 4; //	0100
-		}
-		else
-		{
-			// fall through to 0
-		}
-	}
-	return 0; //	 middle
-}
-
-static FColor GetRegionColor(const uint8 Region)
-{
-	if (Region == 9)
-	{
-		return FColor::Red;
-	}
-	else if (Region == 5)
-	{
-		return FColor::Orange;
-	}
-	else if (Region == 1)
-	{
-		return FColor::Yellow;
-	}
-	else if (Region == 10)
-	{
-		return FColor::Blue;
-	}
-	else if (Region == 6)
-	{
-		return FColor::Green;
-	}
-	else if (Region == 2)
-	{
-		return FColor::Cyan;
-	}
-	else if (Region == 8)
-	{
-		return FColor::Black;
-	}
-	else if (Region == 4)
-	{
-		return FColor::White;
-	}
-	return FColor::Black;
-}
-
-// todo: call me only once in practice, or just figure it out and hardcode it... I'm lazy right now
-// PointMultipliers should be integers anyways...
-static void ComputeLinePairs(const FVector PointMultipliers[8], IntPair Pairs[12])
-{
-	int Output = 0;
-	for (int i = 0; i < 8; ++i)
-	{
-		for (int j = i + 1; j < 8; ++j)
-		{
-			const bool XDiffers = !FMath::IsNearlyEqual(
-				PointMultipliers[i].X, PointMultipliers[j].X, 0.1f);
-			const bool YDiffers = !FMath::IsNearlyEqual(
-				PointMultipliers[i].Y, PointMultipliers[j].Y, 0.1f);
-			const bool ZDiffers = !FMath::IsNearlyEqual(
-				PointMultipliers[i].Z, PointMultipliers[j].Z, 0.1f);
-
-			const int NumDifferent = XDiffers + YDiffers + ZDiffers;
-			check(NumDifferent > 0 && NumDifferent <= 3);
-			if (NumDifferent == 1)
-			{
-				Pairs[Output++] = {i, j};
-				if (Output == 12)
-				{
-					return;
-				}
-			}
-		}
-	}
-}
-
-static bool InBoxXY(const FBox& Box, const FVector& Vec)
-{
-	return (Vec.X > Box.Min.X) && (Vec.Y > Box.Min.Y) && (Vec.X < Box.Max.X) && (Vec.Y < Box.Max.Y);
-}
-
-static bool InBoxXZ(const FBox& Box, const FVector& Vec)
-{
-	return (Vec.X > Box.Min.X) && (Vec.Z > Box.Min.Z) && (Vec.X < Box.Max.X) && (Vec.Z < Box.Max.Z);
-}
-
-static bool InBoxYZ(const FBox& Box, const FVector& Vec)
-{
-	return (Vec.Y > Box.Min.Y) && (Vec.Z > Box.Min.Z) && (Vec.Y < Box.Max.Y) && (Vec.Z < Box.Max.Z);
-}
-
-
-static bool RaysIntersect(const FQuat& World_R_Actor, const FVector& World_t_Actor, const FBox& LocalBox,
-                          const FVector& CameraLocationInWorld, const FVector& RayDirectionInWorld)
-{
-	const FVector CameraInActor = World_R_Actor.Inverse() * (CameraLocationInWorld - World_t_Actor);
-	const FVector RayDirInActor = World_R_Actor.Inverse() * RayDirectionInWorld;
-
-	// shorthand:
-	const FVector& P = CameraInActor;
-	const FVector& L = RayDirInActor;
-
-	// check every face:
-	{
-		if (FMath::Abs(L.Z) > SMALL_NUMBER)
-		{
-			// top
-			{
-				// We intersect the top, check if it is in bounds:
-				const float W = LocalBox.Max.Z;
-				const float D = (-P.Z + W) / L.Z;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxXY(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-			// bottom
-			{
-				const float W = -1 * LocalBox.Min.Z;
-				const float D = -(P.Z + W) / L.Z;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxXY(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-		}
-		if (FMath::Abs(L.Y) > SMALL_NUMBER)
-		{
-			// +Y
-			{
-				const float W = LocalBox.Max.Y;
-				const float D = (-P.Y + W) / L.Y;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxXZ(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-			// -Y
-			{
-				const float W = -1 * LocalBox.Min.Y;
-				const float D = -(P.Y + W) / L.Y;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxXZ(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-		}
-		if (FMath::Abs(L.X) > SMALL_NUMBER)
-		{
-			// +X
-			{
-				const float W = LocalBox.Max.X;
-				const float D = (-P.X + W) / L.X;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxYZ(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-			// -X
-			{
-				const float W = -1 * LocalBox.Min.X;
-				const float D = -(P.X + W) / L.X;
-				const FVector IntersectPt = P + L * D;
-				if (InBoxYZ(LocalBox, IntersectPt))
-				{
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
-static bool Intersects(const FQuat& World_R_Actor, const FVector& World_t_Actor, const FBox& LocalBox,
-                       const FBoxPlanes& Planes, UWorld* const World)
-{
-	const FVector PointMultipliers[8] = {
-		FVector{1, 1, 1},
-		FVector{1, 1, -1},
-		FVector{1, -1, -1},
-		FVector{1, -1, 1},
-		FVector{-1, 1, 1},
-		FVector{-1, 1, -1},
-		FVector{-1, -1, -1},
-		FVector{-1, -1, 1},
-	};
-
-	// Convert pts to world
-	FVector WorldPts[8];
-	for (int i = 0; i < 8; ++i)
-	{
-		WorldPts[i] = World_R_Actor * (LocalBox.GetExtent() * PointMultipliers[i] + LocalBox.GetCenter()) +
-			World_t_Actor;
-	}
-
-	//	Assign regions to points
-	uint8 Regions[8];
-	for (int i = 0; i < 8; ++i)
-	{
-		Regions[i] = GetRegion(WorldPts[i], Planes);
-		if (!Regions[i])
-		{
-			return true; //	early exit, one point is within the box
-		}
-		DrawDebugPoint(World, WorldPts[i], 10.0f, GetRegionColor(Regions[i]));
-	}
-
-	// lines that make up the box:
-	IntPair LinePairs[12];
-	ComputeLinePairs(PointMultipliers, LinePairs); //	only do this once in real life obviously...
-
-	// do check on lines
-	for (const IntPair& Line : LinePairs)
-	{
-		const uint8 RegionFirst = Regions[Line.i];
-		const uint8 RegionSecond = Regions[Line.j];
-		const bool bMightIntersect = (RegionFirst & RegionSecond) == 0;
-		constexpr bool bUseEarlyExit = true;
-
-		// if this test fails (cohen sutherland algorithm) then we can early exit this line, it can't possibly intersect
-		if (!bMightIntersect && bUseEarlyExit)
-		{
-			// Cannot pass through, draw point...
-			DrawDebugPoint(World, WorldPts[Line.i] * 0.5f + WorldPts[Line.j] * 0.5f, 10.0f, FColor::White);
-			continue;
-		}
-
-		// Might still pass through, check it against the planes:
-		{
-			FVector IntersectionPt;
-			const bool bIntersectsLeft = FMath::SegmentPlaneIntersection(WorldPts[Line.i],
-			                                                             WorldPts[Line.j], Planes.LeftPlane,
-			                                                             IntersectionPt);
-			if (bIntersectsLeft)
-			{
-				const uint8 IntersectionRegion = GetRegion(IntersectionPt, Planes);
-				if (IntersectionRegion == 0 || IntersectionRegion == 4 || IntersectionRegion == 8)
-				{
-					// intersection point is in the middle (vertical)
-					return true;
-				}
-			}
-		}
-		{
-			FVector IntersectionPt;
-			const bool bIntersectsRight = FMath::SegmentPlaneIntersection(WorldPts[Line.i],
-			                                                              WorldPts[Line.j], Planes.RightPlane,
-			                                                              IntersectionPt);
-			if (bIntersectsRight)
-			{
-				const uint8 IntersectionRegion = GetRegion(IntersectionPt, Planes);
-				if (IntersectionRegion == 0 || IntersectionRegion == 4 || IntersectionRegion == 8)
-				{
-					// intersection point is in the middle (vertical)
-					return true;
-				}
-			}
-		}
-		{
-			FVector IntersectionPt;
-			const bool bIntersectsTop = FMath::SegmentPlaneIntersection(WorldPts[Line.i],
-			                                                            WorldPts[Line.j], Planes.TopPlane,
-			                                                            IntersectionPt);
-			if (bIntersectsTop)
-			{
-				const uint8 IntersectionRegion = GetRegion(IntersectionPt, Planes);
-				if (IntersectionRegion == 0 || IntersectionRegion == 1 || IntersectionRegion == 2)
-				{
-					// intersection point is in the middle (vertical)
-					return true;
-				}
-			}
-		}
-		{
-			FVector IntersectionPt;
-			const bool bIntersectsBottom = FMath::SegmentPlaneIntersection(WorldPts[Line.i],
-			                                                               WorldPts[Line.j], Planes.BottomPlane,
-			                                                               IntersectionPt);
-			if (bIntersectsBottom)
-			{
-				const uint8 IntersectionRegion = GetRegion(IntersectionPt, Planes);
-				if (IntersectionRegion == 0 || IntersectionRegion == 1 || IntersectionRegion == 2)
-				{
-					// intersection point is in the middle (vertical)
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
 void ADragSelectPlayerController::BoxSelect(const FVector2D& StartPoint, const FVector2D& EndPoint)
 {
 	const FVector2D TopLeft{FMath::Min(StartPoint.X, EndPoint.X), FMath::Min(StartPoint.Y, EndPoint.Y)};
-	const FVector2D TopRight{FMath::Max(StartPoint.X, EndPoint.X), FMath::Min(StartPoint.Y, EndPoint.Y)};
 	const FVector2D BottomRight{FMath::Max(StartPoint.X, EndPoint.X), FMath::Max(StartPoint.Y, EndPoint.Y)};
-	const FVector2D BottomLeft{FMath::Min(StartPoint.X, EndPoint.X), FMath::Max(StartPoint.Y, EndPoint.Y)};
 
 	const bool bDegenerate = (BottomRight - TopLeft).X < 0.1f || (BottomRight - TopLeft).Y < 0.1f;
 	if (bDegenerate)
 	{
-		UE_LOG(LogEngine, Warning, TEXT("this case is degen yo"));
+		UE_LOG(LogEngine, Warning, TEXT("this case is degenerate, the box is too small"));
 		return;
 	}
 
-	UCameraComponent* const Camera = GetPawn()->FindComponentByClass<UCameraComponent>();
-	check(Camera);
-	CameraLocationInWorld = Camera->GetComponentLocation();
-	CameraForwardInWorld = Camera->GetForwardVector();
+	// Compute the selection region vectors:
+	USelectionBoxFunctionLibrary::CreateSelectionRegionForBoxCorners(this, StartPoint, EndPoint, Region);
 
-	FVector Unused{};
-	UGameplayStatics::DeprojectScreenToWorld(this, TopLeft, Unused, TopLeftRayInWorld);
-	UGameplayStatics::DeprojectScreenToWorld(this, TopRight, Unused, TopRightRayInWorld);
-	UGameplayStatics::DeprojectScreenToWorld(this, BottomRight, Unused, BottomRightRayInWorld);
-	UGameplayStatics::DeprojectScreenToWorld(this, BottomLeft, Unused, BottomLeftRayInWorld);
-
-	// PLanes in the world frame
-	WorldPlanes = PlanesForCamera(CameraLocationInWorld, CameraForwardInWorld, TopLeftRayInWorld, TopRightRayInWorld,
-	                              BottomLeftRayInWorld, BottomRightRayInWorld);
+	// precompute the planes for a saving
+	const FRegionPlanes Planes = Region.ComputePlanes();
 
 	// now try to select
 	// Don't use GetAllActorsOfClass in practice, etc...
 	TArray<AActor*> Actors;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), SelectableActorClass, Actors);
 
-	for (AActor* const Actor : Actors)
+	// In actual practice, you would definitely want to compute the local bound in advance and save that:
+	TArray<FBoxSphereBounds> Bounds;
+	TArray<FBoxSphereBounds> WorldBounds;
+	for (const AActor* const Actor : Actors)
 	{
-		ATargetActor* const AsTargetActor = Cast<ATargetActor>(Actor);
-		check(AsTargetActor);
-		FVector OriginWorld;
-		FVector BoxExtentWorld;
-		AsTargetActor->GetActorBounds(false, OriginWorld, BoxExtentWorld, false);
-
-		DrawDebugBox(GetWorld(), OriginWorld, BoxExtentWorld, FColor::Blue);
-
-		const FBox LocalBox = AsTargetActor->CalculateComponentsBoundingBoxInLocalSpace(true, false);
-		const FVector World_t_Actor = AsTargetActor->GetActorLocation();
-		const FQuat World_R_Actor = AsTargetActor->GetActorRotation().Quaternion();
-
-		const bool bAnyRayIntersects =
-			RaysIntersect(World_R_Actor, World_t_Actor, LocalBox, CameraLocationInWorld, TopLeftRayInWorld) ||
-			RaysIntersect(World_R_Actor, World_t_Actor, LocalBox, CameraLocationInWorld, TopRightRayInWorld) ||
-			RaysIntersect(World_R_Actor, World_t_Actor, LocalBox, CameraLocationInWorld, BottomRightRayInWorld) ||
-			RaysIntersect(World_R_Actor, World_t_Actor, LocalBox, CameraLocationInWorld, BottomLeftRayInWorld);
-
-		// if no ray corner intersects, do the other thing:
-		const bool bIntersects = bAnyRayIntersects || Intersects(World_R_Actor, World_t_Actor, LocalBox, WorldPlanes,
-		                                                         GetWorld());
-		if (bIntersects)
-		{
-			DrawDebugBox(GetWorld(), OriginWorld, BoxExtentWorld, FColor::Blue);
-		}
-
-		// update visuals on the selected actor
-		AsTargetActor->ChangeSelection(bIntersects);
+		// compute local bounds
+		Bounds.Add(Actor->CalculateComponentsBoundingBoxInLocalSpace(true, false));
+		// compute world-bounds as well:
+		WorldBounds.Add(Actor->GetComponentsBoundingBox(true, false));
 	}
 
+	// store which actors were intersected
+	TArray<bool> bIntersections;
+	bIntersections.SetNumZeroed(Actors.Num());
+
+#define DO_FAST	//	We want to do the faster pre-computed version.
+
+	int Counter = 0;
+	const double Start = FPlatformTime::Seconds();
+	for (const AActor* const Actor : Actors)
+	{
+#ifdef DO_FAST
+		// first check the bounding sphere
+		const FBoxSphereBounds& WorldBoxSphere = WorldBounds[Counter];
+		const bool bSpherePossiblyOverlaps =
+			USelectionBoxFunctionLibrary::SelectionRegionOverlapsSphere2(Planes, WorldBoxSphere.Origin,
+			                                                             WorldBoxSphere.SphereRadius);
+		if (!bSpherePossiblyOverlaps)
+		{
+			// don't bother checking the box:
+			Counter++;
+			continue;
+		}
+
+		// then do the more expensive OBB check
+		bIntersections[Counter] = USelectionBoxFunctionLibrary::SelectionRegionOverlapsTransformedBox2(
+				Region, Planes, Actor->GetActorTransform(), Bounds[Counter].Origin, Bounds[Counter].BoxExtent) !=
+			ETransformedBoxTestResult::NoIntersection;
+#else
+		// slow version that doesn't use precomputed bounds or planes
+		bIntersections[Counter] = USelectionBoxFunctionLibrary::SelectionRegionOverlapsActor(
+			Region, Actor, true, false);
+#endif
+		Counter++;
+	}
+	const double End = FPlatformTime::Seconds();
+
+	// Update visuals:
+	for (int32 Index = 0; Index < Actors.Num(); ++Index)
+	{
+		ATargetActor* const TargetActor = Cast<ATargetActor>(Actors[Index]);
+		check(TargetActor);
+		if (bIntersections[Index])
+		{
+			FVector OriginWorld;
+			FVector BoxExtentWorld;
+			TargetActor->GetActorBounds(false, OriginWorld, BoxExtentWorld, false);
+			DrawDebugBox(GetWorld(), OriginWorld, BoxExtentWorld, FColor::Blue);
+		}
+		// update visuals on the selected actor
+		TargetActor->ChangeSelection(bIntersections[Index]);
+	}
+
+	UE_LOG(LogEngine, Display, TEXT("Time per actor: %.8f microseconds"), ((End - Start) / Actors.Num()) * 1e6);
 	bInitialized = true;
 }
 
@@ -432,75 +109,42 @@ void ADragSelectPlayerController::Tick(const float DeltaSeconds)
 	{
 		return;
 	}
+#ifdef DRAW_DEBUG
 	constexpr float kLineDistance = 50.0f * 100.0f;
-	DrawDebugLine(GetWorld(), CameraLocationInWorld, CameraLocationInWorld + TopLeftRayInWorld * kLineDistance,
+	DrawDebugLine(GetWorld(), Region.CameraOrigin, Region.CameraOrigin + Region.TopLeftRay * kLineDistance,
 	              FColor::Blue,
 	              false, -1, 0, 5.0f);
-	DrawDebugLine(GetWorld(), CameraLocationInWorld, CameraLocationInWorld + TopRightRayInWorld * kLineDistance,
+	DrawDebugLine(GetWorld(), Region.CameraOrigin, Region.CameraOrigin + Region.TopRightRay * kLineDistance,
 	              FColor::Red,
 	              false, -1, 0, 5.0f);
-	DrawDebugLine(GetWorld(), CameraLocationInWorld, CameraLocationInWorld + BottomRightRayInWorld * kLineDistance,
+	DrawDebugLine(GetWorld(), Region.CameraOrigin, Region.CameraOrigin + Region.BottomRightRay * kLineDistance,
 	              FColor::Purple, false, -1, 0, 5.0f);
-	DrawDebugLine(GetWorld(), CameraLocationInWorld, CameraLocationInWorld + BottomLeftRayInWorld * kLineDistance,
+	DrawDebugLine(GetWorld(), Region.CameraOrigin, Region.CameraOrigin + Region.BottomLeftRay * kLineDistance,
 	              FColor::Green, false, -1, 0, 5.0f);
 
+	const FRegionPlanes WorldPlanes = Region.ComputePlanes();
 	constexpr float kArrowLength = 200.0f;
 	constexpr float kArrowSize = 10.0f;
-	DrawDebugDirectionalArrow(GetWorld(), CameraLocationInWorld,
-	                          CameraLocationInWorld + WorldPlanes.LeftPlane.GetNormal() * kArrowLength, kArrowSize,
+	DrawDebugDirectionalArrow(GetWorld(), Region.CameraOrigin,
+	                          Region.CameraOrigin + WorldPlanes.LeftPlane.GetNormal() * kArrowLength, kArrowSize,
 	                          FColor::Yellow,
 	                          false, -1.f, 0,
 	                          5.0f);
-	DrawDebugDirectionalArrow(GetWorld(), CameraLocationInWorld,
-	                          CameraLocationInWorld + WorldPlanes.RightPlane.GetNormal() * kArrowLength, kArrowSize,
+	DrawDebugDirectionalArrow(GetWorld(), Region.CameraOrigin,
+	                          Region.CameraOrigin + WorldPlanes.RightPlane.GetNormal() * kArrowLength, kArrowSize,
 	                          FColor::Orange,
 	                          false, -1.f,
 	                          0, 5.0f);
 
-	DrawDebugDirectionalArrow(GetWorld(), CameraLocationInWorld,
-	                          CameraLocationInWorld + WorldPlanes.TopPlane.GetNormal() * kArrowLength, kArrowSize,
+	DrawDebugDirectionalArrow(GetWorld(), Region.CameraOrigin,
+	                          Region.CameraOrigin + WorldPlanes.TopPlane.GetNormal() * kArrowLength, kArrowSize,
 	                          FColor::Green,
 	                          false, -1.f, 0,
 	                          5.0f);
-	DrawDebugDirectionalArrow(GetWorld(), CameraLocationInWorld,
-	                          CameraLocationInWorld + WorldPlanes.BottomPlane.GetNormal() * kArrowLength, kArrowSize,
+	DrawDebugDirectionalArrow(GetWorld(), Region.CameraOrigin,
+	                          Region.CameraOrigin + WorldPlanes.BottomPlane.GetNormal() * kArrowLength, kArrowSize,
 	                          FColor::Blue,
 	                          false, -1.f, 0,
 	                          5.0f);
-}
-
-FBoxPlanes ADragSelectPlayerController::PlanesForCamera(const FVector& CameraLocation,
-                                                        const FVector& CameraForward,
-                                                        const FVector& TopLeftRay,
-                                                        const FVector& TopRightRay,
-                                                        const FVector& BottomLeftRay,
-                                                        const FVector& BottomRightRay)
-{
-	FBoxPlanes Result;
-	// form planes defined by the corner vectors
-	// SignFlip was here just in case the FConvexVolume wanted the planes reversed.
-	// When SignFlip is 1, we are using planes that point _out_ from the frustum:
-	constexpr float SignFlip = 1.0f;
-	Result.LeftPlane = FPlane{
-		CameraLocation, SignFlip * FVector::CrossProduct(BottomLeftRay, TopLeftRay).GetSafeNormal()
-	};
-	Result.RightPlane = FPlane{
-		CameraLocation,
-		SignFlip * FVector::CrossProduct(TopRightRay, BottomRightRay).GetSafeNormal()
-	};
-	Result.TopPlane = FPlane{
-		CameraLocation, SignFlip * FVector::CrossProduct(TopLeftRay, TopRightRay).GetSafeNormal()
-	};
-	Result.BottomPlane = FPlane{
-		CameraLocation,
-		SignFlip * FVector::CrossProduct(BottomRightRay, BottomLeftRay).GetSafeNormal()
-	};
-	// Max selection distance:
-	constexpr float kNearDistance = 100.0f;
-	constexpr float kFarDistance = 50 * 100.0f;
-	Result.NearPlane = FPlane{CameraLocation + CameraForward * kNearDistance, -CameraForward * SignFlip};
-	Result.FarPlane = FPlane{
-		CameraLocation + CameraForward * kFarDistance, CameraForward * SignFlip
-	};
-	return Result;
+#endif
 }
